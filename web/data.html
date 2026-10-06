@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Saved Data</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script type="module" src="js/firebase-config.js"></script>
+</head>
+<body>
+    <div class="admin-container">
+        <header class="admin-header">
+            <h1>Saved Data</h1>
+            <p>Cards, Barcodes, and Checkouts</p>
+            <div style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;">
+                <a class="tab-btn" href="dashboard.html">Dashboard</a>
+                <a class="tab-btn" href="register-cards.html">Register Cards</a>
+                <a class="tab-btn" href="register-books.html">Register Books</a>
+                <a class="tab-btn" href="relay.html">Barcode Relay</a>
+                <a class="tab-btn active" href="data.html">Saved Data</a>
+            </div>
+        </header>
+
+        <section class="view-section">
+            <div class="view-header">
+                <h2>Data</h2>
+                <div class="view-tabs">
+                    <button class="tab-btn active" data-tab="cards">Cards</button>
+                    <button class="tab-btn" data-tab="barcodes">Barcodes</button>
+                    <button class="tab-btn" data-tab="checkouts">Checkouts</button>
+                    <button class="tab-btn" data-tab="returns">Returns</button>
+                </div>
+            </div>
+            
+            <div class="tab-content active" id="cardsTab">
+                <div id="cardsList" class="items-list">
+                    <p class="loading-text">Loading cards...</p>
+                </div>
+            </div>
+            
+            <div class="tab-content" id="barcodesTab">
+                <div id="barcodesList" class="items-list">
+                    <p class="loading-text">Loading barcodes...</p>
+                </div>
+            </div>
+
+            <div class="tab-content" id="checkoutsTab">
+                <div id="checkoutsList" class="items-list">
+                    <p class="loading-text">Loading checkouts...</p>
+                </div>
+            </div>
+
+            <div class="tab-content" id="returnsTab">
+                <div id="returnsList" class="items-list">
+                    <p class="loading-text">Loading returns...</p>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
+

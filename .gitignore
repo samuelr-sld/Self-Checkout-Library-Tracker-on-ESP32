@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Secrets - use the *.example.h templates instead
+firmware/**/secrets.h
+.env
+.env.*
+
+# Firebase CLI output
+firebase-debug.log
+*-debug.log
+.firebase/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

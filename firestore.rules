@@ -1,0 +1,44 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ✅ ESP32 ONLY uses /sync collection for all bi-directional communication
+    // - Website sends card verification data through /sync
+    // - Website sends book info through /sync  
+    // - Website sends barcodes through /sync
+    // - ESP32 sends RFID through /sync
+    match /sync/{document=**} {
+      allow read, write: if true;
+    }
+
+    // Protected collections - Website/Cloud Functions manage these
+    // ESP32 does NOT access these directly
+    match /cards/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /barcodes/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /checkouts/{document=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    match /returns/{document=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    // Cloud Functions only
+    match /mail/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

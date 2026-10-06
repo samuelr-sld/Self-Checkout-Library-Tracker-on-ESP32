@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register Books</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script type="module" src="js/firebase-config.js"></script>
+</head>
+<body>
+    <div class="admin-container">
+        <header class="admin-header">
+            <h1>Register Books / Barcodes</h1>
+            <p>Add items to the catalog</p>
+            <div style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;">
+                <a class="tab-btn" href="dashboard.html">Dashboard</a>
+                <a class="tab-btn" href="register-cards.html">Register Cards</a>
+                <a class="tab-btn active" href="register-books.html">Register Books</a>
+                <a class="tab-btn" href="relay.html">Barcode Relay</a>
+                <a class="tab-btn" href="data.html">Saved Data</a>
+            </div>
+        </header>
+
+        <section class="registration-section">
+            <h2>Register New Barcode</h2>
+            <form class="registration-form" id="barcodeForm">
+                <div class="form-group">
+                    <label for="barcode">Barcode Number:</label>
+                    <input type="text" id="barcode" name="barcode" placeholder="Scan with USB scanner or type barcode here" required autofocus>
+                    <p style="font-size: 0.85rem; color: #666; margin-top: 5px;">Place cursor here and scan with USB barcode scanner</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="itemTitle">Item Title:</label>
+                    <input type="text" id="itemTitle" name="itemTitle" placeholder="Enter item/book title" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="itemAuthor">Author / Creator:</label>
+                    <input type="text" id="itemAuthor" name="itemAuthor" placeholder="Enter author or creator">
+                </div>
+                
+                <div class="form-group">
+                    <label for="itemType">Item Type:</label>
+                    <select id="itemType" name="itemType">
+                        <option value="book">Book</option>
+                        <option value="magazine">Magazine</option>
+                        <option value="dvd">DVD</option>
+                        <option value="equipment">Equipment</option>
+                        <option value="other">Other</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="itemStatus">Status:</label>
+                    <select id="itemStatus" name="itemStatus">
+                        <option value="available">Available</option>
+                        <option value="checked_out">Checked Out</option>
+                        <option value="reserved">Reserved</option>
+                        <option value="maintenance">Maintenance</option>
+                    </select>
+                </div>
+                
+                <button type="submit" id="barcodeSubmitBtn" class="btn-primary">Register Barcode</button>
+                <div id="barcodeStatusMessage" class="status-message"></div>
+            </form>
+        </section>
+
+        <section class="view-section">
+            <div class="view-header">
+                <h2>Registered Barcodes</h2>
+            </div>
+            <div id="barcodesList" class="items-list">
+                <p class="loading-text">Loading barcodes...</p>
+            </div>
+        </section>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
+
