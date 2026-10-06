@@ -16,10 +16,10 @@
   - USB Barcode Scanner (connected to laptop, reads from Serial/USB)
   
   Firebase Setup Required:
-  1. Install libraries: WiFi, Firebase ESP32 Client
+  1. Install libraries: TFT_eSPI, MFRC522 (WiFi and HTTPClient come with the ESP32 core)
   2. Copy secrets.example.h to secrets.h and set your WiFi credentials
-  3. Get Firebase credentials from Firebase Console
-  4. Update Firebase configuration below
+  3. Create the kiosk's Firebase Auth account and put it in secrets.h (see README)
+  4. Update the Firebase configuration below to match your project
   
   Barcode Scanner Setup:
   - Barcode scanner connected to laptop via USB
@@ -96,12 +96,9 @@ const char* FIREBASE_PROJECT_ID = "self-checkout-library-system";
 const char* FIREBASE_API_KEY = "AIzaSyCG_dtaIXO9TVNZJ45f3G7u_3KEKHMAoxc";
 const char* FIRESTORE_URL = "https://firestore.googleapis.com/v1/projects/self-checkout-library-system/databases/(default)/documents";
 
-// NOTE: Firestore REST API requires proper authentication
-// For production, you may need:
-// 1. Service Account authentication (more secure)
-// 2. OAuth2 token
-// 3. Or set Firestore rules to allow public writes (NOT recommended for production)
-// For testing: Update Firestore security rules to allow writes temporarily
+// NOTE: firestore.rules only lets signed-in staff touch the data. The kiosk signs in with its own
+// Firebase Auth account (DEVICE_EMAIL / DEVICE_PASSWORD in secrets.h) and sends the resulting ID
+// token with every Firestore request - see the Firebase Auth section below.
 
 // WiFi and Firebase connection status
 bool wifiConnected = false;
@@ -119,6 +116,7 @@ void updateBookStatus(String barcode, String action);
 void sendCheckoutToFirebase();
 String getFirestoreTimestamp();
 String getCheckoutTimestampRFC3339();
+void authorize(HTTPClient& http);
 
 // Real-time sync timing
 unsigned long lastSyncCheck = 0;
@@ -323,7 +321,7 @@ void showHomePage() {
   // Reset all values for new checkout session
   rfidUID = "";
   bookBarcode = "";
-  rfidDetected = false;  // ✓ Already present
+  rfidDetected = false;  // ÃƒÂ¢Ã…â€œÃ¢â‚¬Å“ Already present
   userName = "";
   studentId = "";
   bookName = "";
@@ -843,9 +841,129 @@ void connectWiFi() {
 
 //------------------------------------------------------------------------------------------
 
+//------------------------------------------------------------------------------------------
+// Firebase Auth (REST API)
+//
+// The kiosk signs in with its own account (DEVICE_EMAIL / DEVICE_PASSWORD from secrets.h) and
+// sends the resulting ID token as a Bearer header on every Firestore request. ID tokens last
+// about an hour, so they are renewed with the refresh token shortly before they expire.
+// firestore.rules only accepts accounts listed in the `devices` collection.
+
+String idToken = "";
+String refreshToken = "";
+unsigned long tokenIssuedMs = 0;
+unsigned long tokenLifetimeMs = 0;
+
+// Escapes backslashes and quotes so a password can be placed inside a JSON string
+String jsonEscape(const String& s) {
+  String out = s;
+  out.replace("\\", "\\\\");
+  out.replace("\"", "\\\"");
+  return out;
+}
+
+// Reads a string value ("key": "value") out of a flat JSON response
+String jsonStringValue(const String& body, const char* key) {
+  String needle = String("\"") + key + "\"";
+  int keyPos = body.indexOf(needle);
+  if (keyPos == -1) return "";
+  int colon = body.indexOf(':', keyPos + needle.length());
+  if (colon == -1) return "";
+  int open = body.indexOf('"', colon + 1);
+  if (open == -1) return "";
+  int close = body.indexOf('"', open + 1);
+  if (close == -1) return "";
+  return body.substring(open + 1, close);
+}
+
+// Saves the tokens from a sign-in or refresh response (the two use different key names)
+bool storeTokens(const String& body, const char* idKey, const char* refreshKey, const char* expiresKey) {
+  String newIdToken = jsonStringValue(body, idKey);
+  String newRefreshToken = jsonStringValue(body, refreshKey);
+  long expiresInSec = jsonStringValue(body, expiresKey).toInt();
+
+  if (newIdToken.length() == 0 || newRefreshToken.length() == 0) return false;
+  if (expiresInSec <= 0) expiresInSec = 3600;
+
+  idToken = newIdToken;
+  refreshToken = newRefreshToken;
+  tokenIssuedMs = millis();
+  // Treat the token as expired 5 minutes early so a request never goes out with a stale one
+  tokenLifetimeMs = (unsigned long)(expiresInSec > 300 ? expiresInSec - 300 : expiresInSec / 2) * 1000UL;
+  return true;
+}
+
+bool signInDevice() {
+  String url = String("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=") + FIREBASE_API_KEY;
+  String payload = String("{\"email\":\"") + jsonEscape(DEVICE_EMAIL) +
+                   "\",\"password\":\"" + jsonEscape(DEVICE_PASSWORD) +
+                   "\",\"returnSecureToken\":true}";
+
+  HTTPClient http;
+  http.setTimeout(10000);
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(payload);
+  String body = (code > 0) ? http.getString() : "";
+  http.end();
+
+  if (code == 200 && storeTokens(body, "idToken", "refreshToken", "expiresIn")) {
+    Serial.println("Firebase Auth: signed in as kiosk device");
+    return true;
+  }
+
+  idToken = "";
+  refreshToken = "";
+  Serial.print("Firebase Auth: sign-in failed, HTTP ");
+  Serial.print(code);
+  Serial.print(" ");
+  // Firebase reports the reason, e.g. INVALID_LOGIN_CREDENTIALS or OPERATION_NOT_ALLOWED
+  Serial.println(jsonStringValue(body, "message"));
+  return false;
+}
+
+bool refreshIdToken() {
+  if (refreshToken.length() == 0) return false;
+
+  String url = String("https://securetoken.googleapis.com/v1/token?key=") + FIREBASE_API_KEY;
+
+  HTTPClient http;
+  http.setTimeout(10000);
+  http.begin(url);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  int code = http.POST("grant_type=refresh_token&refresh_token=" + refreshToken);
+  String body = (code > 0) ? http.getString() : "";
+  http.end();
+
+  if (code == 200 && storeTokens(body, "id_token", "refresh_token", "expires_in")) {
+    Serial.println("Firebase Auth: token refreshed");
+    return true;
+  }
+
+  Serial.print("Firebase Auth: token refresh failed, HTTP ");
+  Serial.println(code);
+  return false;
+}
+
+// True when we hold a token that is still valid, getting a fresh one if needed
+bool ensureAuth() {
+  if (idToken.length() > 0 && (unsigned long)(millis() - tokenIssuedMs) < tokenLifetimeMs) return true;
+  if (WiFi.status() != WL_CONNECTED) return false;
+  return refreshIdToken() || signInDevice();
+}
+
+// Call right after http.begin(url) on every Firestore request
+void authorize(HTTPClient& http) {
+  if (ensureAuth()) {
+    http.addHeader("Authorization", "Bearer " + idToken);
+  }
+}
+
+//------------------------------------------------------------------------------------------
+
 void initFirebase() {
   Serial.println("Initializing Firebase Firestore...");
-  
+
   // Test connection by making a simple request
   // For Firestore REST API, we'll use HTTPClient
   // Just mark as ready if WiFi is connected
@@ -854,6 +972,9 @@ void initFirebase() {
     Serial.println("Firebase Firestore ready!");
     Serial.print("Project ID: ");
     Serial.println(FIREBASE_PROJECT_ID);
+    // Sign in now so a bad DEVICE_EMAIL / DEVICE_PASSWORD shows up at boot
+    // (requests retry the sign-in on their own if this fails)
+    ensureAuth();
   } else {
     firebaseReady = false;
     Serial.println("Firebase not ready - WiFi not connected");
@@ -877,6 +998,7 @@ void checkCardRegistration(String normalizedRFID) {
   HTTPClient http;
   http.setTimeout(10000);
   http.begin(url);
+  authorize(http);
   
   int httpResponseCode = http.GET();
   
@@ -1076,114 +1198,6 @@ void checkCardRegistration(String normalizedRFID) {
   Serial.print(", email (stored in studentId): ");
   Serial.println(studentId);
 }
-                    
-                    // Now extract NAME field - look AFTER fieldsPos to avoid metadata
-                    int nameSearchStart = fieldsPos;
-                    int namePos = doc.indexOf("\"name\"", nameSearchStart);
-                    
-                    // Make sure we're finding the name in fields, not document name
-                    while (namePos != -1) {
-                      // Check if this "name" is followed by a ":" and then "{"
-                      // Pattern should be: "name": { "stringValue": "Samuel" }
-                      int checkColon = doc.indexOf(":", namePos);
-                      if (checkColon != -1 && checkColon < namePos + 10) {
-                        int checkBrace = doc.indexOf("{", checkColon);
-                        int checkQuote = doc.indexOf("\"", checkColon);
-                        
-                        // If we find { before ", this is a field, not metadata
-                        if (checkBrace != -1 && checkBrace < checkQuote) {
-                          // This is the actual name field!
-                          unsigned int nameLimit = (unsigned int)namePos + 300;
-                          if (nameLimit > docLen) nameLimit = docLen;
-                          String nameSec = doc.substring(namePos, nameLimit);
-                          
-                          int nameSv = nameSec.indexOf("\"stringValue\"");
-                          if (nameSv != -1) {
-                            int nameColon = nameSec.indexOf(":", nameSv);
-                            int nameQuote = nameSec.indexOf("\"", nameColon);
-                            if (nameQuote != -1) {
-                              int nameStart = nameQuote + 1;
-                              int nameEnd = nameSec.indexOf("\"", nameStart);
-                              if (nameEnd > nameStart) {
-                                userName = nameSec.substring(nameStart, nameEnd);
-                                Serial.print("User NAME: ");
-                                Serial.println(userName);
-                                break; // Found name, stop searching
-                              }
-                            }
-                          }
-                        }
-                      }
-                      
-                      // Continue searching for next "name"
-                      namePos = doc.indexOf("\"name\"", namePos + 6);
-                    }
-                    
-                    // Extract EMAIL field
-                    int emailPos = doc.indexOf("\"email\"", fieldsPos);
-                    if (emailPos != -1) {
-                      unsigned int emailLimit = (unsigned int)emailPos + 300;
-                      if (emailLimit > docLen) emailLimit = docLen;
-                      String emailSec = doc.substring(emailPos, emailLimit);
-                      
-                      int emailSv = emailSec.indexOf("\"stringValue\"");
-                      if (emailSv != -1) {
-                        int emailColon = emailSec.indexOf(":", emailSv);
-                        int emailQuote = emailSec.indexOf("\"", emailColon);
-                        if (emailQuote != -1) {
-                          int emailStart = emailQuote + 1;
-                          int emailEnd = emailSec.indexOf("\"", emailStart);
-                          if (emailEnd > emailStart) {
-                            studentId = emailSec.substring(emailStart, emailEnd);
-                            Serial.print("User EMAIL: ");
-                            Serial.println(studentId);
-                          }
-                        }
-                      }
-                    }
-                    
-                    break; // Found our card, stop checking documents
-                  }
-                }
-              }
-            }
-          }
-        } else {
-          Serial.println("'cardId' field not found in this document");
-        }
-      }
-      
-      docStart = response.indexOf("{", docEnd);
-    }
-    
-    Serial.print("Checked ");
-    Serial.print(checked);
-    Serial.println(" documents");
-    
-    if (!found) {
-      cardRegistered = false;
-      Serial.println("Card NOT found in database");
-    }
-  } else {
-    Serial.print("HTTP error: ");
-    Serial.println(httpResponseCode);
-    cardRegistered = false;
-  }
-  
-  http.end();
-  checkingCardRegistration = false;
-  Serial.print("=== End card check - cardRegistered: ");
-  Serial.println(cardRegistered ? "TRUE" : "FALSE");
-  
-  updateRFIDDisplay();
-  
-  Serial.print("Display state - cardRegistered: ");
-  Serial.print(cardRegistered);
-  Serial.print(", userName: ");
-  Serial.print(userName);
-  Serial.print(", email (stored in studentId): ");
-  Serial.println(studentId);
-}
 //------------------------------------------------------------------------------------------
 
 void checkForBarcodeFromWebsite() {
@@ -1196,6 +1210,7 @@ void checkForBarcodeFromWebsite() {
   HTTPClient http;
   http.setTimeout(5000);
   http.begin(url);
+  authorize(http);
   
   int httpResponseCode = http.GET();
   
@@ -1314,6 +1329,7 @@ void markBarcodeReceived() {
   HTTPClient http;
   http.setTimeout(10000);
   http.begin(url);
+  authorize(http);
   http.addHeader("Content-Type", "application/json");
   
   int httpResponseCode = http.PATCH(jsonPayload);
@@ -1395,6 +1411,7 @@ void sendRFIDForRegistration(String rfidCardId) {
   HTTPClient http;
   http.setTimeout(10000); // 10 second timeout
   http.begin(url);
+  authorize(http);
   http.addHeader("Content-Type", "application/json");
   
   int httpResponseCode = http.POST(jsonPayload);
@@ -1446,6 +1463,7 @@ void checkForBookInfo() {
   HTTPClient http;
   http.setTimeout(10000);
   http.begin(url);
+  authorize(http);
   
   int httpResponseCode = http.GET();
   
@@ -1454,213 +1472,6 @@ void checkForBookInfo() {
   
   if (httpResponseCode == 200) {
     String response = http.getString();
-    Serial.println("=== Barcodes response received ===");
-    Serial.print("Response length: ");
-    Serial.println(response.length());
-    
-    // Normalize barcode for comparison
-    String search = bookBarcode;
-    search.replace(" ", "");
-    search.toUpperCase();
-    
-    Serial.print("Searching for normalized barcode: ");
-    Serial.println(search);
-    
-    int docsPos = response.indexOf("\"documents\"");
-    if (docsPos == -1) {
-      Serial.println("ERROR: No 'documents' array found");
-      bookName = "No books in database";
-      bookAuthor = "";
-      waitingForBookInfo = false;
-      updateBookInputDisplay();
-      http.end();
-      return;
-    }
-    
-    Serial.println("Found 'documents' array in response");
-    
-    bool found = false;
-    int docStart = response.indexOf("{", docsPos);
-    int checked = 0;
-    
-    while (docStart != -1 && !found && checked < 50) {
-      checked++;
-      int docEnd = docStart + 1;
-      int braces = 1;
-      while (docEnd < response.length() && braces > 0) {
-        if (response.charAt(docEnd) == '{') braces++;
-        if (response.charAt(docEnd) == '}') braces--;
-        docEnd++;
-      }
-      
-      if (braces == 0) {
-        String doc = response.substring(docStart, docEnd);
-        unsigned int docLen = doc.length();
-        
-        Serial.print("Document ");
-        Serial.print(checked);
-        Serial.println(" extracted");
-        
-        // Look for "barcode" field - but make sure it's the actual barcode field
-        // We need to find the field that contains the barcode NUMBER, not "type": "barcode"
-        
-        // Strategy: Look for all occurrences of "barcode" and check each one
-        int barcodeField = -1;
-        int searchPos = 0;
-        
-        while (searchPos < doc.length()) {
-          int tempPos = doc.indexOf("\"barcode\"", searchPos);
-          if (tempPos == -1) break;
-          
-          Serial.print("Found 'barcode' at position ");
-          Serial.println(tempPos);
-          
-          // Extract a section around this position to check context
-          int checkStart = (tempPos > 100) ? tempPos - 100 : 0;
-          unsigned int checkEnd = (unsigned int)tempPos + 200;
-          if (checkEnd > docLen) checkEnd = docLen;
-          String context = doc.substring(checkStart, checkEnd);
-          
-          // Print context for debugging
-          Serial.println("Context around 'barcode':");
-          Serial.println(context);
-          
-          // Check if this "barcode" is actually a field name for barcode data
-          // Look for the pattern: "barcode": { "stringValue": "number" }
-          // Extract what comes after "barcode"
-          unsigned int afterBarcode = (unsigned int)tempPos + 300;
-          if (afterBarcode > docLen) afterBarcode = docLen;
-          String section = doc.substring(tempPos, afterBarcode);
-          
-          int svPos = section.indexOf("\"stringValue\"");
-          if (svPos != -1) {
-            int colonPos = section.indexOf(":", svPos);
-            if (colonPos != -1) {
-              int quotePos = section.indexOf("\"", colonPos + 1);
-              if (quotePos != -1) {
-                int valueStart = quotePos + 1;
-                int valueEnd = section.indexOf("\"", valueStart);
-                
-                if (valueEnd > valueStart) {
-                  String value = section.substring(valueStart, valueEnd);
-                  Serial.print("Found stringValue: '");
-                  Serial.print(value);
-                  Serial.println("'");
-                  
-                  // Check if this value is "barcode" (the type field) or a number (the actual barcode)
-                  if (value != "barcode" && value.length() > 0) {
-                    // This looks like an actual barcode value!
-                    String normalizedValue = value;
-                    normalizedValue.replace(" ", "");
-                    normalizedValue.toUpperCase();
-                    
-                    Serial.print("Normalized value: '");
-                    Serial.print(normalizedValue);
-                    Serial.print("' vs searching for: '");
-                    Serial.print(search);
-                    Serial.println("'");
-                    
-                    if (normalizedValue == search) {
-                      Serial.println("*** BARCODE MATCH FOUND! ***");
-                      found = true;
-                      
-                      // Extract title
-                      int titlePos = doc.indexOf("\"title\"");
-                      if (titlePos == -1) titlePos = doc.indexOf("\"itemTitle\"");
-                      if (titlePos != -1) {
-                        unsigned int titleLimit = (unsigned int)titlePos + 300;
-                        if (titleLimit > docLen) titleLimit = docLen;
-                        String titleSec = doc.substring(titlePos, titleLimit);
-                        int titleSv = titleSec.indexOf("\"stringValue\"");
-                        if (titleSv != -1) {
-                          int titleColon = titleSec.indexOf(":", titleSv);
-                          int titleQuote = titleSec.indexOf("\"", titleColon + 1);
-                          if (titleQuote != -1) {
-                            int titleStart = titleQuote + 1;
-                            int titleEnd = titleSec.indexOf("\"", titleStart);
-                            if (titleEnd > titleStart) {
-                              bookName = titleSec.substring(titleStart, titleEnd);
-                              Serial.print("Title: ");
-                              Serial.println(bookName);
-                            }
-                          }
-                        }
-                      }
-                      
-                      // Extract author
-                      int authorPos = doc.indexOf("\"author\"");
-                      if (authorPos == -1) authorPos = doc.indexOf("\"itemAuthor\"");
-                      if (authorPos != -1) {
-                        unsigned int authorLimit = (unsigned int)authorPos + 300;
-                        if (authorLimit > docLen) authorLimit = docLen;
-                        String authorSec = doc.substring(authorPos, authorLimit);
-                        int authorSv = authorSec.indexOf("\"stringValue\"");
-                        if (authorSv != -1) {
-                          int authorColon = authorSec.indexOf(":", authorSv);
-                          int authorQuote = authorSec.indexOf("\"", authorColon + 1);
-                          if (authorQuote != -1) {
-                            int authorStart = authorQuote + 1;
-                            int authorEnd = authorSec.indexOf("\"", authorStart);
-                            if (authorEnd > authorStart) {
-                              bookAuthor = authorSec.substring(authorStart, authorEnd);
-                              Serial.print("Author: ");
-                              Serial.println(bookAuthor);
-                            }
-                          }
-                        }
-                      }
-                      
-                      waitingForBookInfo = false;
-                      updateBookInputDisplay();
-                      break; // Found the barcode, stop searching
-                    }
-                  } else {
-                    Serial.println("This is the 'type' field, not the barcode field. Continuing search...");
-                  }
-                }
-              }
-            }
-          }
-          
-          searchPos = tempPos + 10;
-        }
-        
-        if (found) break; // Stop checking documents if we found it
-      }
-      
-      docStart = response.indexOf("{", docEnd);
-    }
-    
-    Serial.print("Checked ");
-    Serial.print(checked);
-    Serial.println(" documents");
-    
-    if (!found) {
-      Serial.println("Barcode not found in database");
-      bookName = "Book not found";
-      bookAuthor = "Please register barcode";
-      waitingForBookInfo = false;
-      updateBookInputDisplay();
-    }
-  } else {
-    Serial.print("ERROR: HTTP request failed with code: ");
-    Serial.println(httpResponseCode);
-    
-    if (httpResponseCode > 0) {
-      String response = http.getString();
-      Serial.print("Error response: ");
-      Serial.println(response);
-    }
-    
-    bookName = "Database error";
-    bookAuthor = "";
-    waitingForBookInfo = false;
-    updateBookInputDisplay();
-  }
-  
-  http.end();
-  Serial.println("=== End book info check ===");
-}
     Serial.println("=== Barcodes response received ===");
     Serial.print("Response length: ");
     Serial.println(response.length());
@@ -1882,6 +1693,7 @@ void cleanupSyncDocument(String sessionId) {
   HTTPClient http;
   http.setTimeout(10000);
   http.begin(delUrl);
+  authorize(http);
   int delCode = http.sendRequest("DELETE");
 
   if (delCode == 200 || delCode == 204) {
@@ -1953,6 +1765,7 @@ void sendCheckoutToFirebase() {
   // Create HTTP client
   HTTPClient http;
   http.begin(url);
+  authorize(http);
   http.addHeader("Content-Type", "application/json");
   
   // Send POST request
@@ -2018,6 +1831,7 @@ void updateBookStatus(String barcode, String action) {
   HTTPClient http;
   http.setTimeout(10000);
   http.begin(getUrl);
+  authorize(http);
   int getCode = http.GET();
 
   if (getCode != 200) {
@@ -2080,7 +1894,7 @@ void updateBookStatus(String barcode, String action) {
           Serial.print("Updating book '"); Serial.print(docId);
           Serial.print("' status to: "); Serial.println(newStatus);
 
-          // updateMask ensures ONLY the status field is written — other fields are untouched
+          // updateMask ensures ONLY the status field is written ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â other fields are untouched
           String updateUrl = String(FIRESTORE_URL) + "/barcodes/" + docId
             + "?updateMask.fieldPaths=status&key=" + String(FIREBASE_API_KEY);
 
@@ -2089,6 +1903,7 @@ void updateBookStatus(String barcode, String action) {
           HTTPClient upHttp;
           upHttp.setTimeout(10000);
           upHttp.begin(updateUrl);
+          authorize(upHttp);
           upHttp.addHeader("Content-Type", "application/json");
           int upCode = upHttp.PATCH(payload);
           Serial.print("Book status update response code: "); Serial.println(upCode);
@@ -2109,7 +1924,7 @@ void updateBookStatus(String barcode, String action) {
     docStart = response.indexOf("{", docEnd);
   }
 
-  Serial.println("Book not found in barcodes collection — status not updated");
+  Serial.println("Book not found in barcodes collection ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â status not updated");
 }
 
 //------------------------------------------------------------------------------------------

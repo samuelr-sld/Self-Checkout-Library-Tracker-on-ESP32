@@ -2,41 +2,90 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // ✅ ESP32 ONLY uses /sync collection for all bi-directional communication
-    // - Website sends card verification data through /sync
-    // - Website sends book info through /sync  
-    // - Website sends barcodes through /sync
-    // - ESP32 sends RFID through /sync
-    match /sync/{document=**} {
-      allow read, write: if true;
+
+    // ---------------------------------------------------------------------
+    // Roles
+    //
+    // Everything requires a signed-in Firebase Auth user that has been given
+    // a role. A role is a document keyed by the user's UID, created by hand
+    // in the Firebase console (no client can write these collections):
+    //
+    //   admins/{uid}   librarians using the web dashboard
+    //   devices/{uid}  the ESP32 kiosk's service account
+    //
+    // Signing up alone grants nothing: a stranger who creates an account with
+    // the (public) API key still has no role, so every rule below denies them.
+    // ---------------------------------------------------------------------
+    function signedIn() {
+      return request.auth != null;
     }
 
-    // Protected collections - Website/Cloud Functions manage these
-    // ESP32 does NOT access these directly
-    match /cards/{document=**} {
-      allow read, write: if request.auth != null;
+    function isAdmin() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
 
-    match /barcodes/{document=**} {
-      allow read, write: if request.auth != null;
+    function isDevice() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/devices/$(request.auth.uid));
     }
 
-    match /checkouts/{document=**} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
+    function isStaff() {
+      return isAdmin() || isDevice();
     }
 
-    match /returns/{document=**} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
+    // True when an update touches only the listed fields
+    function onlyChanges(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
     }
 
-    // Cloud Functions only
-    match /mail/{document=**} {
-      allow read, write: if request.auth != null;
+    // Short-lived messages between the dashboard and the kiosk
+    // (RFID scans, barcodes, book info). Both sides read, write and clean up.
+    match /sync/{docId} {
+      allow read, write: if isStaff();
     }
 
-    // Default deny
+    // Registered patrons (contain names, emails, phone numbers).
+    // The kiosk only reads them to check a tapped card is registered.
+    match /cards/{cardId} {
+      allow read: if isStaff();
+      allow write: if isAdmin();
+    }
+
+    // Catalogue. The kiosk reads it to look up books and may flip only the
+    // `status` field when something is borrowed or returned.
+    match /barcodes/{barcodeId} {
+      allow read: if isStaff();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() ||
+        (isDevice() &&
+         onlyChanges(['status']) &&
+         request.resource.data.status in ['available', 'borrowed', 'checked_out']);
+    }
+
+    // Transactions: the kiosk (or an admin) records them, only admins read them
+    // back, and Cloud Functions (which bypass these rules) clean them up.
+    match /checkouts/{checkoutId} {
+      allow read: if isAdmin();
+      allow create: if isStaff();
+      allow update, delete: if isAdmin();
+    }
+
+    match /returns/{returnId} {
+      allow read: if isAdmin();
+      allow create: if isStaff();
+      allow update, delete: if isAdmin();
+    }
+
+    // Outgoing email queue (Trigger Email extension). The dashboard queues the
+    // welcome email when a card is registered; Cloud Functions queue the rest.
+    // Nobody can read the queue from a client.
+    match /mail/{mailId} {
+      allow create: if isAdmin();
+    }
+
+    // `reminders`, `admins`, `devices` and anything else: Cloud Functions /
+    // the Firebase console only (the Admin SDK bypasses these rules).
     match /{document=**} {
       allow read, write: if false;
     }

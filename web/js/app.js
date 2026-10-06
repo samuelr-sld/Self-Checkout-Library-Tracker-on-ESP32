@@ -4,12 +4,17 @@ document.addEventListener('DOMContentLoaded', function() {
     const hasCheckoutsList = !!document.getElementById('checkoutsList');
     const hasReturnsList = !!document.getElementById('returnsList');
 
-    // Wait for Firebase to initialize
-    setTimeout(() => {
-        if (!window.db) {
-            console.error('Firebase not initialized');
+    // Wait for Firebase to restore the saved session. Signed-out visitors go to the login page.
+    // (This is a convenience; the real protection is firestore.rules.)
+    if (!window.authReady) console.error('Firebase not initialized');
+    (window.authReady || Promise.resolve(null)).then((user) => {
+        if (!user) {
+            window.location.replace('login.html');
             return;
         }
+        document.documentElement.classList.add('authed');
+        addSignOutBar(user);
+
         if (hasCardsList) loadCards();
         if (hasBarcodesList) loadBarcodes();
         if (hasCheckoutsList) loadCheckouts();
@@ -25,7 +30,32 @@ document.addEventListener('DOMContentLoaded', function() {
         if (document.getElementById('barcode') && document.getElementById('barcodeForm')) {
             setupBarcodeScannerForRegistration();
         }
-    }, 1000);
+    });
+
+    // Shows who is signed in, with a sign-out button, at the bottom of the page header
+    function addSignOutBar(user) {
+        const header = document.querySelector('.admin-header');
+        if (!header) return;
+
+        const bar = document.createElement('div');
+        bar.className = 'auth-bar';
+
+        const who = document.createElement('span');
+        who.textContent = user.email || 'Signed in';
+
+        const signOutBtn = document.createElement('button');
+        signOutBtn.type = 'button';
+        signOutBtn.className = 'tab-btn';
+        signOutBtn.textContent = 'Sign out';
+        signOutBtn.addEventListener('click', async () => {
+            const { signOut } = await import('https://www.gstatic.com/firebasejs/12.8.0/firebase-auth.js');
+            await signOut(window.auth);
+            window.location.replace('login.html');
+        });
+
+        bar.append(who, signOutBtn);
+        header.appendChild(bar);
+    }
 
     // Card Form Handler
     const cardForm = document.getElementById('cardForm');

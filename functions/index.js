@@ -59,8 +59,8 @@ exports.onCheckoutCreated = functions.firestore
       // Compute due date (7 days after checkout time)
       const dueDate = new Date(timestamp.getTime() + 7 * 24 * 60 * 60 * 1000);
 
-      // Compute reminder date (3 minutes after checkout time)
-      const reminderDate = new Date(timestamp.getTime() + 3 * 60 * 1000);
+      // The reminder is due on the due date; processReminders (daily) sends it on its first run after that
+      const reminderDate = dueDate;
 
       // Queue immediate borrow receipt email (if email exists)
       if (toEmail) {

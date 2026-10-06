@@ -37,6 +37,32 @@ body {
     opacity: 0.9;
 }
 
+/* Pages stay hidden until the visitor is confirmed signed in (see app.js / login.html) */
+html:not(.authed) body {
+    visibility: hidden;
+}
+
+.auth-bar {
+    margin-top: 15px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    font-size: 0.95rem;
+}
+
+.auth-bar .tab-btn {
+    padding: 6px 14px;
+    font-family: inherit;
+    font-size: 0.9rem;
+}
+
+.login-container {
+    max-width: 480px;
+    margin-top: 60px;
+}
+
 .admin-content {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
